@@ -18,17 +18,14 @@
 
 import pathlib
 import math
-import subprocess
-import time
 from collections import defaultdict
 from datetime import datetime
-import sys
-import gdal
 import lxml.etree as ET
 import netCDF4
 import numpy as np
-import osgeo.ogr as ogr
-import osgeo.osr as osr
+from osgeo import gdal
+from osgeo import ogr as ogr
+from osgeo import osr as osr
 import pyproj
 import scipy.ndimage
 import safe_to_netcdf.utils as utils
@@ -50,6 +47,7 @@ class Sentinel2_reader_and_NetCDF_converter:
     def __init__(self, product, indir, outdir):
         self.product_id = product
         self.input_zip = (indir / product).with_suffix('.zip')
+        # si no zip -> no safe dir
         self.SAFE_dir = (outdir / self.product_id).with_suffix('.SAFE')
         self.processing_level = None
         self.xmlFiles = defaultdict(list)
@@ -77,111 +75,38 @@ class Sentinel2_reader_and_NetCDF_converter:
         """
 
         # 1) Fetch main file
-        self.xmlFiles['manifest'] = self.uncompress('manifest.safe')
-        print((self.xmlFiles['manifest']))
-        if not self.xmlFiles['manifest']:
-            print("\nNo manifest.safe file. Most likely S2 L1C Norwegian DEM product")
-            self.dterrengdata = True
-            self.xmlFiles['mainXML'] = self.uncompress('MTD*.xml')
+        #self.xmlFiles['manifest'] = self.uncompress('manifest.safe')
+        #print((self.xmlFiles['manifest']))
+        #if not self.xmlFiles['manifest']:
+        #    print("\nNo manifest.safe file. Most likely S2 L1C Norwegian DEM product")
+        #    self.dterrengdata = True
+        #    self.xmlFiles['mainXML'] = self.uncompress('MTD*.xml')
 
         # 2) Set some of the global __init__ variables
-        utils.initializer(self, self.xmlFiles['manifest'])
+        #utils.initializer(self, self.xmlFiles['manifest'])
         #todo: add dterreng case
         ##    initializer_ok = self.initializer_dterr(self.xmlFiles['mainXML'])
+        utils.initializer(self)
 
         # 3) Read sun and view angles
         print('\nRead view and sun angles')
         if not self.dterrengdata:
             self.readSunAndViewAngles(self.xmlFiles['S2_{}_Tile1_Metadata'.format(
                 self.processing_level)])
-
-            # self.readSunAndViewAngles(self.SAFE_path + self.xmlFiles[
-            # 'S2_Level-2A_Tile1_Metadata'])
         else:
             self.readSunAndViewAngles(self.xmlFiles['MTD_TL'])
 
         # 4) Read vector information
         print('\nRead vector information')
 
+        # todo not working yet without unzipping
         for gmlfile in self.xmlFiles.values():
-            if gmlfile and gmlfile.suffix == '.gml':
+            if gmlfile and gmlfile.endswith('.gml'):
                     vectorID, vectorPath = self.readVectorInformation(gmlfile)
                     self.vectorInformation[vectorID] = vectorPath
 
         # 5) Retrieve SAFE product structure
-        ##self.SAFE_structure = self.list_product_structure()
-
-    def uncompress(self, xmlReturn):
-        """ Uncompress SAFE zip file. Return xmlReturn file
-
-            Keyword arguments:
-            xmlReturn -- string specifying name of xmlFile to return
-        """
-
-        self.SAFE_dir.parent.mkdir(parents=True, exist_ok=True)
-
-        # If zip not extracted yet
-        if not self.SAFE_dir.is_dir():
-            cmd = f'/usr/bin/unzip {self.input_zip} -d {self.SAFE_dir.parent}'
-            subprocess.call(cmd, shell=True)
-            if not self.SAFE_dir.is_dir():
-                print(f'Error unzipping file {self.input_zip}')
-                sys.exit()
-
-        # todo: will not work for dterreng data as it's a regular expression
-        xmlFile = self.SAFE_dir / xmlReturn
-        if not xmlFile.is_file():
-            print(f'Main file not available {xmlFile}')
-            return False
-
-        return xmlFile
-
-    def initializer(self, mainXML):
-        """ Traverse manifest file for setting additional variables
-            in __init__ """
-
-        root = utils.xml_read(mainXML)
-
-        # Set xml-files
-        dataObjectSection = root.find('./dataObjectSection')
-        for dataObject in dataObjectSection.findall('./'):
-            repID = dataObject.attrib['ID']
-            ftype = None
-            href = None
-            for element in dataObject.iter():
-                attrib = element.attrib
-                if 'mimeType' in attrib:
-                    ftype = attrib['mimeType']
-                if 'href' in attrib:
-                    href = attrib['href'][1:]
-            if (ftype == 'text/xml' or ftype == 'application/xml') and href:
-                self.xmlFiles[repID] = self.SAFE_dir / href[1:]
-            elif ftype == 'application/octet-stream':
-                self.imageFiles[repID] = self.SAFE_dir / href[1:]
-
-        # Set processing level
-        for k in list(self.xmlFiles.keys()):
-            if "Level-1C" in k:
-                self.processing_level = "Level-1C"
-                break
-            elif "Level-2A" in k:
-                self.processing_level = "Level-2A"
-                break
-
-        if not self.processing_level:
-            print("Unknown processing level. Hence terminating.")
-            sys.exit(1)
-
-        # Set gdal object
-        # str(self.xmlFiles['manifest'])
-        self.src = gdal.Open(
-            str(self.xmlFiles['S2_{}_Product_Metadata'.format(self.processing_level)]))
-        print((self.src))
-
-        # Set global metadata attributes from gdal
-        self.globalAttribs = self.src.GetMetadata()
-
-        return True
+        self.SAFE_structure = self.zip.namelist()
 
 ##    def initializer_dterr(self, mainXML):
 ##        """Set additional variables in __init__ for dterrengdata products"""
@@ -211,6 +136,7 @@ class Sentinel2_reader_and_NetCDF_converter:
 ##        # Set global metadata attributes from gdal
 ##        self.globalAttribs = self.src.GetMetadata()
 ##
+
     def write_to_NetCDF(self, nc_outpath, compression_level, chunk_size=(1, 32, 32)):
         """ Method writing output NetCDF product.
 
@@ -555,18 +481,18 @@ class Sentinel2_reader_and_NetCDF_converter:
             utils.memory_use(self.t0)
 
             for k, xmlfile in self.xmlFiles.items():
-                if xmlfile and xmlfile.suffix == '.xml':
-                        xmlString = self.xmlToString(xmlfile)
-
-                        if xmlString:
-                            dim_name = str('dimension_' + k.replace('-', '_'))
-                            ncout.createDimension(dim_name, len(xmlString))
-                            msg_var = ncout.createVariable(k.replace('-', '_'), 'S1', dim_name)
-                            msg_var.long_name = str("SAFE xml file: " + k)
-                            msg_var.comment = "Original SAFE xml file added as character values."
-                            # todo DeprecationWarning: tostring() is deprecated. Use tobytes()
-                            # instead.
-                            msg_var[:] = netCDF4.stringtochar(np.array([xmlString], 'S'))
+                if xmlfile and xmlfile.endswith('.xml'):
+                    #xmlString = self.zip.read(xmlfile)
+                    xmlString = self.xmlToString(self.zip.read(xmlfile))
+                    if xmlString:
+                        dim_name = str('dimension_' + k.replace('-', '_'))
+                        ncout.createDimension(dim_name, len(xmlString))
+                        msg_var = ncout.createVariable(k.replace('-', '_'), 'S1', dim_name)
+                        msg_var.long_name = str("SAFE xml file: " + k)
+                        msg_var.comment = "Original SAFE xml file added as character values."
+                        # todo DeprecationWarning: tostring() is deprecated. Use tobytes()
+                        # instead.
+                        msg_var[:] = netCDF4.stringtochar(np.array([xmlString], 'S'))
 
             # Add SAFE product structure as character values
             ##########################################################
@@ -578,7 +504,8 @@ class Sentinel2_reader_and_NetCDF_converter:
                 msg_var = ncout.createVariable("SAFE_structure", 'S1', dim_name)
                 msg_var.comment = "Original SAFE product structure xml file as character values."
                 msg_var.long_name = "Original SAFE product structure."
-                msg_var[:] = netCDF4.stringtochar(np.array([self.SAFE_structure], 'S'))
+                #todo: ne marche pas, variable vide dans nc
+                msg_var = netCDF4.stringtochar(np.array([self.SAFE_structure], 'S'))
 
             # Add orbit specific data
             ##########################################################
@@ -590,8 +517,11 @@ class Sentinel2_reader_and_NetCDF_converter:
                            "Sentinel-2C": 2, "Sentinel-2D": 3, }
             # orb_dir_id = {"DESCENDING":0, "":1,
 
-            if self.xmlFiles['manifest']:
-                root = utils.xml_read(self.xmlFiles['manifest'])
+            #todo: why? just to avoid S2 dterr? if that's the case,
+            # pb with orb_nb = root.find... further down as root not defined
+            #if self.xmlFiles['manifest']:
+            if self.mainXML:
+                root = utils.xml_read(self.zip.read(self.mainXML))
                 self.globalAttribs['orbitNumber'] = root.find('.//safe:orbitNumber',
                                                               namespaces=root.nsmap).text
 
@@ -647,29 +577,30 @@ class Sentinel2_reader_and_NetCDF_converter:
         """ Method for reading XML files returning the entire file as single
             string.
         """
-        if not xmlfile.is_file():
-            print(('Error: Can\'t find xmlfile %s' % (xmlfile)))
-            return False
-        try:
+        if isinstance(xmlfile, pathlib.Path):
+            if not xmlfile.is_file():
+                print(('Error: Can\'t find xmlfile %s' % (xmlfile)))
+                return False
             parser = ET.XMLParser(recover=True)
             tree = ET.parse(str(xmlfile), parser)
             return ET.tostring(tree)
-        except:
+        elif isinstance(xmlfile, str):
             print(("Could not parse %s as xmlFile. Try to open regularly." % xmlfile))
             with open(xmlfile, 'r') as infile:
                 text = infile.read()
             if text:
                 return text
-            else:
-                print(("Could not parse %s. Something wrong with file." % xmlfile))
-                return False
+        elif isinstance(xmlfile, bytes):
+            # xmlfile does not seem to be a path towards a file
+            # should be a zip object
+            return ET.tostring(ET.fromstring(xmlfile))
 
     def readSunAndViewAngles(self, xmlfile):
         """ Method for reading sun and view angles from Sentinel-2
             annotation files.
         """
 
-        root = utils.xml_read(xmlfile)
+        root = utils.xml_read(self.zip.read(xmlfile))
 
         angles_view_list = root.findall('.//Tile_Angles')[0]
         angle_step = float(root.findall('.//COL_STEP')[0].text)  # m
@@ -761,13 +692,14 @@ class Sentinel2_reader_and_NetCDF_converter:
         """ Reading vector information from Sentinel-2 .gml files.
         """
 
-        gmlID = gmlfile.stem
+        gmlID = pathlib.Path(gmlfile).stem
 
-        if not gmlfile.is_file():
-            print(('Error: Can\'t find gmlfile %s' % (gmlfile)))
-            return gmlID, False
+        ##if not gmlfile.is_file():
+        ##    print(('Error: Can\'t find gmlfile %s' % (gmlfile)))
+        ##    return gmlID, False
 
         # Create directories for output
+        # todo can avoid the tmp dir?
         output_dir = self.SAFE_dir / 'tmp'
         # if python < 3.5
         ##if not output_dir.is_dir():
@@ -776,10 +708,24 @@ class Sentinel2_reader_and_NetCDF_converter:
 
         destName = (output_dir / gmlID).with_suffix('.shp')
 
-        vto = gdal.VectorTranslateOptions(format='ESRI Shapefile')
-        vt = gdal.VectorTranslate(destNameOrDestDS=str(destName), srcDS=str(gmlfile), options=vto)
-        vt.FlushCache()
-        vt = None
+        ## Solution with unzipped file
+        ##vto = gdal.VectorTranslateOptions(format='ESRI Shapefile')
+        ##gmlfile_full = self.SAFE_dir.parent / gmlfile
+        ##vt = gdal.VectorTranslate(destNameOrDestDS=str(destName), srcDS=str(gmlfile_full),
+        ##                          options=vto)
+        ##vt.FlushCache()
+        ##vt = None
+
+        ## Same but without unzipping
+        ## Functionnal but extremely slow
+        ##gmlfile_open = '/vsizip/' + str(self.input_zip) + '/' + gmlfile
+        ##vt = gdal.VectorTranslate(destNameOrDestDS=str(destName), srcDS=gmlfile_open,
+        ##                                                                    options=vto)
+
+        # Could use ogr2ogr with subprocess
+        # Working and fast with unzipped file
+        # Did not manage to get it to work with vsizip
+        ##ogr2ogr -f "ESRI Shapefile" output.shp input.gml
 
         if destName.is_file():
             return gmlID, destName
@@ -815,6 +761,7 @@ class Sentinel2_reader_and_NetCDF_converter:
         pixel_size = 10
         NoData_value = 255
         """
+
 
         # Open the data source and read in the extent
         NoData_value = 0
@@ -900,39 +847,6 @@ class Sentinel2_reader_and_NetCDF_converter:
 
         return latitude, longitude
 
-# todo
-##    def list_product_structure(self, startpath=None):
-##        """ Traverse SAFE file structure (or any file structure) and
-##            creates a xml file containing the file structure.
-##
-##            Returns a string representation of the xml file."""
-##
-##        if not startpath:
-##            startpath = self.SAFE_path
-##
-##        root_path = startpath.split('/')[-1]
-##        ET_root = ET.Element(root_path)
-##        # Create dictionary that contains all elements
-##        elements = {root_path: ET_root}
-##
-##        # Iterate throgh the file structure
-##        for root, dirs, files in os.walk(startpath):
-##            level = root.replace(startpath, '').count(os.sep)
-##            current_xpath = str('/' + root_path + root.replace(startpath, ''))
-##            current_path = root.replace(startpath, '')
-##
-##            # Create all folder elements
-##            if dirs:
-##                for dir in dirs:
-##                    element = ET.SubElement(elements[current_xpath.strip('/')], dir)
-##                    elements[str(current_xpath.strip('/') + '/' + dir)] = element
-##            # Add all files in the correct folder
-##            for f in files:
-##                sub_element = ET.SubElement(elements[current_xpath.strip('/')], 'file')
-##                sub_element.text = f
-##
-##        return ET.tostring(ET_root)
-##
 
 if __name__ == '__main__':
 

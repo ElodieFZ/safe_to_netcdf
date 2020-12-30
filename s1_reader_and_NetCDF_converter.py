@@ -15,12 +15,12 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from datetime import timedelta
-import gdal
 import netCDF4
 import numpy as np
 from scipy import interpolate
 import pathlib
 import safe_to_netcdf.utils as utils
+import zipfile
 
 
 class Sentinel1_reader_and_NetCDF_converter:
@@ -65,10 +65,8 @@ class Sentinel1_reader_and_NetCDF_converter:
         """
 
         # 1) Fetch manifest.xml file
-        self.xmlFiles['manifest'] = self.uncompress()
-
         # 2) Set some of the gloal parameters
-        utils.initializer(self, self.xmlFiles['manifest'])
+        utils.initializer(self)
 
         gcps_ok = self.getGCPs()
 
@@ -143,7 +141,7 @@ class Sentinel1_reader_and_NetCDF_converter:
             'coordinateConversionList', 'swathMergeList']
 
         for xmlFile in self.xmlFiles['s1Level1ProductSchema']:
-            root = utils.xml_read(xmlFile)
+            root = utils.xml_read(self.zip.read(xmlFile))
             polarisation = root.find('.//polarisation').text
 
             for pm in productMetadata_parameters:
@@ -265,65 +263,6 @@ class Sentinel1_reader_and_NetCDF_converter:
             self.productMetadataList[polarisation][listType] = swathBoundsList
         else:
             print("Extraction of %s is not implemented" % listType)
-
-    def uncompress(self):
-        """ Uncompress SAFE zip file. Return manifest file """
-
-        # If zip not extracted yet
-        if not self.SAFE_dir.is_dir():
-            cmd = f'/usr/bin/unzip {self.input_zip} -d {self.SAFE_dir.parent}'
-            subprocess.call(cmd, shell=True)
-            if not self.SAFE_dir.is_dir():
-                print(f'Error unzipping file {self.input_zip}')
-                sys.exit()
-
-        xmlFile = self.SAFE_dir / 'manifest.safe'
-        if not xmlFile.is_file():
-            print(f'Manifest file not available {xmlFile}')
-            sys.exit()
-
-        return xmlFile
-
-    def initializer(self, manifest):
-        """ Traverse manifest file for setting additional parameters
-        in __init__ """
-        root = utils.xml_read(manifest)
-
-        # Set xml-files
-        dataObjectSection = root.find('./dataObjectSection')
-        for dataObject in dataObjectSection.findall('./'):
-            repID = dataObject.attrib['repID']
-            ftype = None
-            href = None
-            for element in dataObject.iter():
-                attrib = element.attrib
-                if 'mimeType' in attrib:
-                    ftype = attrib['mimeType']
-                if 'href' in attrib:
-                    href = attrib['href'][1:]
-            if ftype == 'text/xml' and href:
-                self.xmlFiles[repID].append(self.SAFE_dir / href[1:])
-
-        # Set gdal object
-        self.src = gdal.Open(str(self.xmlFiles['manifest']))
-
-        # Set raster size parameters
-        self.xSize = self.src.RasterXSize
-        self.ySize = self.src.RasterYSize
-
-        # Set global metadata attributes
-        self.globalAttribs = self.src.GetMetadata()
-
-        polarisations = root.findall('.//s1sarl1:transmitterReceiverPolarisation',
-                                     namespaces=root.nsmap)
-        for polarisation in polarisations:
-            self.polarisation.append(polarisation.text)
-        self.globalAttribs['polarisation'] = self.polarisation
-
-        self.globalAttribs['ProductTimelinessCategory'] = root.find(
-            './/s1sarl1:productTimelinessCategory', namespaces=root.nsmap).text
-
-        return True
 
     def getGCPs(self):
         """ Get product GCPs utilizing gdal """
@@ -625,7 +564,7 @@ class Sentinel1_reader_and_NetCDF_converter:
                 values: noiseRangeVectorList, noiseAzimuthVectorList
         """
 
-        root = utils.xml_read(xmlfile)
+        root = utils.xml_read(self.zip.read(xmlfile))
         polarisation = root.find('.//polarisation').text
 
         # Noise in range direction
@@ -653,7 +592,7 @@ class Sentinel1_reader_and_NetCDF_converter:
                          'radarFrequency', 'linesPerBurst',
                          'azimuthTimeInterval', 'productFirstLineUtcTime']
         for LAD in self.xmlFiles['s1Level1ProductSchema']:
-            lad_root = utils.xml_read(LAD)
+            lad_root = utils.xml_read(self.zip.read(LAD))
             lad_polarisation = lad_root.find('.//polarisation').text
             if lad_polarisation == polarisation:
                 for lad_var in LAD_variables:
@@ -712,7 +651,7 @@ class Sentinel1_reader_and_NetCDF_converter:
 
     def readPixelsLines(self, xmlfile):
 
-        root = utils.xml_read(xmlfile)
+        root = utils.xml_read(self.zip.read(xmlfile))
         polarisation = root.find('.//polarisation').text
 
         # Get pixels where we have calibration values. Assume regular distripution over all image
@@ -743,7 +682,7 @@ class Sentinel1_reader_and_NetCDF_converter:
         return (polarisation, pixels, lines)
 
     def getCalTable(self, xmlfile, tName):
-        root = utils.xml_read(xmlfile)
+        root = utils.xml_read(self.zip.read(xmlfile))
 
         # Get calibration values
         cal = []
@@ -770,7 +709,7 @@ class Sentinel1_reader_and_NetCDF_converter:
 
     def getGCPValues(self, xmlfile, parameter):
         """ Method for retrieving Geo Location Point parameter from xml file."""
-        root = utils.xml_read(xmlfile)
+        root = utils.xml_read(self.zip.read(xmlfile))
         polarisation = root.find('.//polarisation').text
 
         #

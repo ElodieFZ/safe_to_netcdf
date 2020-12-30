@@ -7,6 +7,7 @@ import lxml.etree as ET
 import datetime as dt
 import resource
 from osgeo import gdal
+import zipfile
 
 
 def xml_read(xml_file):
@@ -14,16 +15,20 @@ def xml_read(xml_file):
 
     Args:
         xml_file ([pathlib object]): [filepath to an xml file]
+                 or zipfile object
     Returns:
         [bool]: [return True if a valid xml filepath is provided, 
         raises an exception if the xmlfile is invalid, empty, or doesn't exist ]
     """
-    if not pathlib.Path(xml_file).is_file():
-        print(f'Error: Can\'t find xmlfile {xml_file}')
-        return None
-
-    tree = ET.parse(str(xml_file))
-    root = tree.getroot()
+    #todo change input variable name
+    if isinstance(xml_file, pathlib.Path):
+        if not pathlib.Path(xml_file).is_file():
+            print(f'Error: Can\'t find xmlfile {xml_file}')
+            return None
+        tree = ET.parse(str(xml_file))
+        root = tree.getroot()
+    elif isinstance(xml_file, bytes):
+        root = ET.fromstring(xml_file)
 
     return root
 
@@ -78,7 +83,7 @@ def create_time(ncfile, t, ref='01/01/1981'):
     return True
 
 
-def initializer(self, xmlFile):
+def initializer(self):
     """
        Traverse manifest file for setting additional variables
             in __init__
@@ -87,8 +92,17 @@ def initializer(self, xmlFile):
 
         Returns:
     """
+
+    self.zip = zipfile.ZipFile(self.input_zip)
+
+    # Try and find main xml
     #todo: add s2 dterreng case
-    root = xml_read(xmlFile)
+    allfiles = self.zip.namelist()
+    if self.product_id + '.SAFE/manifest.safe' in allfiles:
+        self.mainXML = self.product_id + '.SAFE/manifest.safe'
+
+    root = xml_read(self.zip.read(self.mainXML))
+    #root = xml_read(self.mainXML)
     sat = self.product_id.split('_')[0][0:2]
 
     # Set xml-files
@@ -108,22 +122,23 @@ def initializer(self, xmlFile):
                 href = attrib['href'][1:]
         if sat == 'S2':
             if (ftype == 'text/xml' or ftype == 'application/xml') and href:
-                self.xmlFiles[repID] = self.SAFE_dir / href[1:]
+                self.xmlFiles[repID] = self.product_id + '.SAFE' + href
             elif ftype == 'application/octet-stream':
-                self.imageFiles[repID] = self.SAFE_dir / href[1:]
+                self.imageFiles[repID] = self.product_id + '.SAFE' + href
         elif sat == 'S1':
             if ftype == 'text/xml' and href:
-                self.xmlFiles[repID].append(self.SAFE_dir / href[1:])
+                self.xmlFiles[repID].append(self.product_id + '.SAFE' + href)
 
     # Set processing level
     if sat == 'S2':
         self.processing_level = 'Level-' + self.product_id.split('_')[1][4:6]
         gdalFile = str(self.xmlFiles['S2_{}_Product_Metadata'.format(self.processing_level)])
     elif sat == 'S1':
-        gdalFile = str(self.xmlFiles['manifest'])
+        gdalFile = str(self.mainXML)
 
     # Set gdal object
-    self.src = gdal.Open(gdalFile)
+    #self.src = gdal.Open(gdalFile)
+    self.src = gdal.Open('/vsizip/' + str(self.input_zip) + '/' + gdalFile)
     print((self.src))
 
     # Set global metadata attributes from gdal
